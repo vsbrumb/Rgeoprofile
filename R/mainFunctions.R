@@ -18,7 +18,7 @@
 #' @import ggplot2
 #' @import ggmap
 #' @import RColorBrewer
-#' @import rgdal
+#' @importFrom sf st_read
 #' @importFrom raster raster extent extent<- rasterize projectRaster distance
 #' @import viridis
 #' @importFrom grDevices colorRampPalette
@@ -282,16 +282,27 @@ geoParams <- function(data=NULL, sources=NULL, sigma_mean=1, sigma_var=NULL, sig
 #' # load London boroughs by default
 #' geoShapefile()
 
-geoShapefile <- function(fileName=NULL) {
-  
+geoShapefile <- function(fileName = NULL) {
   # load north London boroughs by default
   if (is.null(fileName)) {
-    fileName <- system.file('extdata', 'London_north', package='RgeoProfile')
+    fileName <- system.file("extdata", "London_north", package = "RgeoProfile")
   }
-  
-  # load shapefile
-  ret <- readOGR(fileName, verbose=FALSE)
-  
+
+  # If a directory is supplied, find the .shp file inside it
+  if (dir.exists(fileName)) {
+    shp_files <- list.files(fileName, pattern = "\\.shp$", full.names = TRUE)
+    if (length(shp_files) == 0) {
+      stop("No .shp file found in: ", fileName)
+    }
+    fileName <- shp_files[1]
+  }
+
+  # read shapefile with sf, then convert to sp for compatibility
+  sf_obj <- sf::st_read(fileName, quiet = TRUE)
+
+  # geoMask() expects sp classes such as SpatialPolygonsDataFrame /
+  # SpatialLinesDataFrame, so convert before returning
+  ret <- methods::as(sf_obj, "Spatial")
   return(ret)
 }
 
