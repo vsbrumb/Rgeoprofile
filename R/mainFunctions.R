@@ -282,12 +282,10 @@ geoParams <- function(data=NULL, sources=NULL, sigma_mean=1, sigma_var=NULL, sig
 #' geoShapefile()
 
 geoShapefile <- function(fileName = NULL) {
-  # load north London boroughs by default
   if (is.null(fileName)) {
     fileName <- system.file("extdata", "London_north", package = "RgeoProfile")
   }
 
-  # If a directory is supplied, find the .shp file inside it
   if (dir.exists(fileName)) {
     shp_files <- list.files(fileName, pattern = "\\.shp$", full.names = TRUE)
     if (length(shp_files) == 0) {
@@ -295,6 +293,15 @@ geoShapefile <- function(fileName = NULL) {
     }
     fileName <- shp_files[1]
   }
+
+  extn <- tolower(tools::file_ext(fileName))
+
+  if (extn %in% c("tif", "tiff", "grd", "img", "asc")) {
+    return(terra::rast(fileName))
+  }
+
+  sf::st_read(fileName, quiet = TRUE)
+}
 
   # read shapefile with sf, then convert to sp for compatibility
   sf_obj <- sf::st_read(fileName, quiet = TRUE)
@@ -832,26 +839,92 @@ geoRing <- function(params, data, source, mcmc) {
 #' map3
 #' }
 
-geoMask <- function (probSurface, params, mask, scaleValue = 1, operation = "inside", maths = "multiply") {
-  
-  # check input formats
-  stopifnot(class(mask) %in% c("SpatialPolygonsDataFrame", "RasterLayer","SpatialLinesDataFrame"))
-  stopifnot(operation %in% c("inside", "outside", "near", "far", "continuous"))
-  stopifnot(maths %in% c("multiply", "divide", "add", "subtract", "continuous"))
-  
-  # convert mask to raster
-  if (class(mask) == "RasterLayer") { 
-    rf <- mask
-  } else if (class(mask) == "SpatialPolygonsDataFrame") {
-    tmp <- raster(ncol = params$output$longitude_cells, nrow = params$output$latitude_cells)
-    extent(tmp) <- extent(mask)
-    rf <- rasterize(mask, tmp)
-  } else if (class(mask) == "SpatialLinesDataFrame") {
-    tmp <- raster(ncol = params$output$longitude_cells, nrow = params$output$latitude_cells)
-    extent(tmp) <- extent(mask)
-    rf <- rasterize(mask, tmp)
+geoMask <- function(probSurface,
+                    params,
+                    mask,
+                    operation = c("outside", "inside"),
+                    scaleValue = 1e-9,
+                    target_crs = NULL) {
+
+  operation <- match.arg(operation)
+
+  stopifnot(!is.null(probSurface))
+  stopifnot(!is.null(params))
+  stopifnot(!is.null(mask))
+
+  lon_min <- params$output$longitude_minMax[1]
+  lon_max <- params$output$longitude_minMax[2]
+  lat_min <- params$output$latitude_minMax[1]
+  lat_max <- params$output$latitude_minMax[2]
+  ncol_out <- params$output$longitude_cells
+  nrow_out <- params$output$latitude_cells
+
+  template_ll <- terra::rast(
+    ncols = ncol_out,
+    nrows = nrow_out,
+    xmin = lon_min,
+    xmax = lon_max,
+    ymin = lat_min,
+    ymax = lat_max,
+    crs = "EPSG:4326"
+  )
+
+  values(template_ll) <- as.vector(probSurface)
+
+  if (is.null(target_crs)) {
+    target_crs <- "EPSG:3857"
   }
-  
+
+  template_proj <- terra::project(template_ll, target_crs)
+
+  if (inherits(mask, "sf") || inherits(mask, "sfc")) {
+    if (inherits(mask, "sfc")) {
+      mask <- sf::st_as_sf(mask)
+    }
+    if (is.na(sf::st_crs(mask))) {
+      sf::st_crs(mask) <- sf::st_crs("EPSG:4326")
+    }
+    mask <- sf::st_transform(mask, target_crs)
+    mask_v <- terra::vect(mask)
+    mask_r <- terra::rasterize(mask_v, template_proj, field = 1, background = NA)
+  } else if (inherits(mask, "SpatVector")) {
+    if (is.na(terra::crs(mask))) {
+      terra::crs(mask) <- "EPSG:4326"
+    }
+    mask_v <- terra::project(mask, target_crs)
+    mask_r <- terra::rasterize(mask_v, template_proj, field = 1, background = NA)
+  } else if (inherits(mask, "SpatRaster")) {
+    mask_r <- terra::project(mask, template_proj)
+    mask_r[!is.na(mask_r)] <- 1
+  } else {
+    stop("mask must be sf/sfc, SpatVector, or SpatRaster")
+  }
+
+  inside_mask <- !is.na(mask_r)
+
+  prob_proj <- template_proj
+  vals <- terra::values(prob_proj, mat = FALSE)
+
+  if (operation == "outside") {
+    vals[!inside_mask] <- vals[!inside_mask] * scaleValue
+  } else {
+    vals[inside_mask] <- vals[inside_mask] * scaleValue
+  }
+
+  terra::values(prob_proj) <- vals
+
+  prob_back <- terra::project(prob_proj, template_ll, method = "bilinear")
+  prob_mat <- matrix(
+    terra::values(prob_back, mat = FALSE),
+    nrow = nrow_out,
+    ncol = ncol_out,
+    byrow = TRUE
+  )
+
+  prob_mat <- prob_mat / sum(prob_mat, na.rm = TRUE)
+
+  list(prob = prob_mat)
+}
   # convert probSurface to raster
   raster_probSurface <- raster(probSurface, xmn = params$output$longitude_minMax[1], xmx = params$output$longitude_minMax[2], ymn = params$output$latitude_minMax[1], ymx = params$output$latitude_minMax[2], crs="+proj=longlat +datum=WGS84")
   
